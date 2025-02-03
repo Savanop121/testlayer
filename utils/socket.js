@@ -3,11 +3,13 @@ import chalk from "chalk";
 import { Wallet } from "ethers";
 import log from "./logger.js";
 import { newAgent } from "./helper.js";
+import LayerEdgeAPI from "./layeredge-api.js";
 
 class LayerEdgeConnection {
     constructor(proxy = null, privateKey = null, refCode = "O8Ijyqih") {
         this.refCode = refCode;
         this.proxy = proxy;
+        this.api = new LayerEdgeAPI(privateKey);
         this.headers = {
             Accept: "application/json, text/plain, */*",
             Origin: "https://dashboard.layeredge.io",
@@ -165,39 +167,16 @@ class LayerEdgeConnection {
     async connectNode() {
         for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
             try {
-                // Ensure wallet is registered first
-                if (!await this.ensureRegistration()) {
-                    log.error("Cannot connect node - wallet registration failed");
-                    return false;
-                }
-
-                const timestamp = Date.now();
-                const message = `Node activation request for ${this.wallet.address} at ${timestamp}`;
-                const sign = await this.wallet.signMessage(message);
-
-                const dataSign = {
-                    sign: sign,
-                    timestamp: timestamp,
-                };
-
-                const response = await this.makeRequest(
-                    "post",
-                    `https://referralapi.layeredge.io/api/light-node/node-action/${this.wallet.address}/start`,
-                    { 
-                        data: dataSign,
-                        timeout: this.connectionTimeout
-                    }
-                );
-
-                if (response?.data?.message === "node action executed successfully") {
-                    // Wait and verify node is actually running
-                    await new Promise(resolve => setTimeout(resolve, 5000));
-                    const status = await this.checkNodeStatus();
-                    
-                    if (status) {
-                        log.info("Node connection verified successfully");
-                        return true;
-                    }
+                // Use new API client
+                await this.api.startNode();
+                
+                // Verify node is running
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                const status = await this.api.checkNodeStatus();
+                
+                if (status?.data?.data?.startTimestamp) {
+                    log.info("Node connection verified successfully");
+                    return true;
                 }
 
                 log.warn(`Connection attempt ${attempt + 1}/${this.maxAttempts} failed, retrying...`);
@@ -214,34 +193,12 @@ class LayerEdgeConnection {
 
     async stopNode() {
         try {
-            if (!await this.validateWallet()) {
-                log.error("Cannot stop node - wallet not registered");
-                return false;
-            }
-
-            const timestamp = Date.now();
-            const message = `Node deactivation request for ${this.wallet.address} at ${timestamp}`;
-            const sign = await this.wallet.signMessage(message);
-
-            const dataSign = {
-                sign: sign,
-                timestamp: timestamp,
-            };
-
-            const response = await this.makeRequest(
-                "post",
-                `https://referralapi.layeredge.io/api/light-node/node-action/${this.wallet.address}/stop`,
-                { data: dataSign }
-            );
-
-            if (response?.data?.message?.includes("success")) {
+            const result = await this.api.stopNode();
+            if (result?.message?.includes("success")) {
                 log.info("Node stopped successfully");
                 return true;
             }
-
-            log.error("Failed to stop node:", response?.data?.message);
             return false;
-
         } catch (error) {
             log.error("Error stopping node:", error.message);
             return false;
