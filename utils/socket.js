@@ -24,6 +24,11 @@ class LayerEdgeConnection {
 
         this.maxRetries = 5;
         this.retryDelay = 3000;
+
+        // Add additional configuration
+        this.maxAttempts = 3;
+        this.connectionTimeout = 30000;
+        this.isRegistered = false;
     }
 
     getWallet() {
@@ -125,9 +130,47 @@ class LayerEdgeConnection {
         }
     }
 
+    async validateWallet() {
+        try {
+            const response = await this.makeRequest(
+                "get",
+                `https://referralapi.layeredge.io/api/referral/wallet-details/${this.wallet.address}`
+            );
+            this.isRegistered = response?.data?.data?.referralCode != null;
+            return this.isRegistered;
+        } catch (error) {
+            log.error("Error validating wallet:", error.message);
+            return false;
+        }
+    }
+
+    async ensureRegistration(invite_code = this.refCode) {
+        if (await this.validateWallet()) {
+            return true;
+        }
+
+        log.info("Wallet not registered, attempting registration...");
+        
+        // Verify invite code first
+        const isValidInvite = await this.checkInvite(invite_code);
+        if (!isValidInvite) {
+            log.error("Invalid invite code:", invite_code);
+            return false;
+        }
+
+        // Register wallet
+        return await this.registerWallet(invite_code);
+    }
+
     async connectNode() {
-        for (let i = 0; i < this.maxRetries; i++) {
+        for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
             try {
+                // Ensure wallet is registered first
+                if (!await this.ensureRegistration()) {
+                    log.error("Cannot connect node - wallet registration failed");
+                    return false;
+                }
+
                 const timestamp = Date.now();
                 const message = `Node activation request for ${this.wallet.address} at ${timestamp}`;
                 const sign = await this.wallet.signMessage(message);
@@ -140,52 +183,67 @@ class LayerEdgeConnection {
                 const response = await this.makeRequest(
                     "post",
                     `https://referralapi.layeredge.io/api/light-node/node-action/${this.wallet.address}/start`,
-                    { data: dataSign }
+                    { 
+                        data: dataSign,
+                        timeout: this.connectionTimeout
+                    }
                 );
 
                 if (response?.data?.message === "node action executed successfully") {
+                    // Wait and verify node is actually running
                     await new Promise(resolve => setTimeout(resolve, 5000));
-                    const isRunning = await this.checkNodeStatus();
+                    const status = await this.checkNodeStatus();
                     
-                    if (isRunning) {
-                        log.info("Node connected and verified running");
+                    if (status) {
+                        log.info("Node connection verified successfully");
                         return true;
                     }
                 }
-                
-                log.warn(`Connect attempt ${i + 1} failed, retrying...`);
-                await new Promise(resolve => setTimeout(resolve, this.retryDelay));
-                
+
+                log.warn(`Connection attempt ${attempt + 1}/${this.maxAttempts} failed, retrying...`);
+                await new Promise(resolve => setTimeout(resolve, 5000));
+
             } catch (error) {
-                log.error(`Connect attempt ${i + 1} failed:`, error.message);
-                if (i === this.maxRetries - 1) throw error;
-                await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+                log.error(`Connection attempt ${attempt + 1} failed:`, error.message);
+                if (attempt === this.maxAttempts - 1) throw error;
+                await new Promise(resolve => setTimeout(resolve, 5000));
             }
         }
         return false;
     }
 
     async stopNode() {
-        const timestamp = Date.now();
-        const message = `Node deactivation request for ${this.wallet.address} at ${timestamp}`;
-        const sign = await this.wallet.signMessage(message);
+        try {
+            if (!await this.validateWallet()) {
+                log.error("Cannot stop node - wallet not registered");
+                return false;
+            }
 
-        const dataSign = {
-            sign: sign,
-            timestamp: timestamp,
-        };
+            const timestamp = Date.now();
+            const message = `Node deactivation request for ${this.wallet.address} at ${timestamp}`;
+            const sign = await this.wallet.signMessage(message);
 
-        const response = await this.makeRequest(
-            "post",
-            `https://referralapi.layeredge.io/api/light-node/node-action/${this.wallet.address}/stop`,
-            { data: dataSign }
-        );
+            const dataSign = {
+                sign: sign,
+                timestamp: timestamp,
+            };
 
-        if (response && response.data) {
-            log.info("Stop and Claim Points Result:", response.data);
-            return true;
-        } else {
-            log.error("Failed to Stopping Node and claiming points");
+            const response = await this.makeRequest(
+                "post",
+                `https://referralapi.layeredge.io/api/light-node/node-action/${this.wallet.address}/stop`,
+                { data: dataSign }
+            );
+
+            if (response?.data?.message?.includes("success")) {
+                log.info("Node stopped successfully");
+                return true;
+            }
+
+            log.error("Failed to stop node:", response?.data?.message);
+            return false;
+
+        } catch (error) {
+            log.error("Error stopping node:", error.message);
             return false;
         }
     }
@@ -266,6 +324,38 @@ class LayerEdgeConnection {
             return response?.data?.status === "healthy";
         } catch (error) {
             log.error("Failed to check node health:", error.message);
+            return false;
+        }
+    }
+
+    async setupWallet() {
+        try {
+            // 1. Validate/Register wallet
+            if (!await this.ensureRegistration()) {
+                throw new Error("Wallet registration failed");
+            }
+
+            // 2. Check current node status
+            const isRunning = await this.checkNodeStatus();
+            
+            // 3. Stop if running and needs points claim
+            if (isRunning) {
+                const { nodePoints } = await this.checkNodePoints();
+                if (nodePoints >= 100) { // Configurable threshold
+                    await this.stopNode();
+                    await this.checkIN();
+                }
+            }
+
+            // 4. Start node if not running
+            if (!isRunning) {
+                await this.connectNode();
+            }
+
+            return true;
+
+        } catch (error) {
+            log.error("Wallet setup failed:", error.message);
             return false;
         }
     }
