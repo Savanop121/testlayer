@@ -26,7 +26,10 @@ async function showMenu() {
     console.log("1. Start Node");
     console.log("2. Stop Node");
     console.log("3. Check Running Hours");
-    console.log("4. Exit");
+    console.log("4. Claim Daily Points");
+    console.log("5. Check Tasks");
+    console.log("6. View Referrals");
+    console.log("7. Exit");
     console.log("========================\n");
 }
 
@@ -83,6 +86,23 @@ async function handleCommand(command, socket) {
             break;
 
         case "4":
+            log.info("Claiming daily points...");
+            const claimResult = await socket.api.claimDailyPoints();
+            log.info("Claim result:", claimResult);
+            break;
+
+        case "5":
+            log.info("Checking tasks...");
+            const tasks = await socket.api.getTasks();
+            log.info("Available tasks:", tasks);
+            break;
+
+        case "6":
+            const referralInfo = await socket.api.getReferralCode();
+            log.info("Your referral code:", referralInfo);
+            break;
+
+        case "7":
             log.info("Exiting...");
             process.exit(0);
             break;
@@ -124,12 +144,12 @@ async function main() {
         await showMenu();
 
         const command = await new Promise(resolve => {
-            rl.question("Enter command (1-4): ", resolve);
+            rl.question("Enter command (1-7): ", resolve);
         });
 
         await handleCommand(command, socket);
         
-        if (command === "4") break;
+        if (command === "7") break;
 
         // Ask if user wants to switch wallet
         const switchWallet = await new Promise(resolve => {
