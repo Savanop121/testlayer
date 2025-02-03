@@ -6,7 +6,9 @@
   "main": "main.js",
   "scripts": {
     "start": "node main.js",
-    "autoref": "node autoref.js"
+    "autoref": "node autoref.js",
+    "start:ref": "node mainRef.js",
+    "check": "node utils/check.js"
   },
   "author": "@zlkcyber",
   "license": "MIT",
@@ -15,6 +17,7 @@
     "chalk": "^5.4.1",
     "ethers": "^6.13.5",
     "https-proxy-agent": "^7.0.6",
-    "socks-proxy-agent": "^8.0.5"
+    "socks-proxy-agent": "^8.0.5",
+    "winston": "^3.11.0"
   }
 }
