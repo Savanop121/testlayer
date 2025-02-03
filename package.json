@@ -9,7 +9,8 @@
     "autoref": "node autoref.js",
     "start:ref": "node mainRef.js",
     "check": "node utils/check.js",
-    "cli": "node cli.js"
+    "cli": "node cli.js",
+    "server": "node server.js"
   },
   "author": "@zlkcyber",
   "license": "MIT",
@@ -19,6 +20,11 @@
     "ethers": "^6.13.5",
     "https-proxy-agent": "^7.0.6",
     "socks-proxy-agent": "^8.0.5",
-    "winston": "^3.11.0"
+    "winston": "^3.11.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.0.3"
   }
 }
