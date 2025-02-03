@@ -26,89 +26,83 @@ async function run() {
     log.info(banner);
     await delay(3);
 
-    const proxies = await readFiles('proxy.txt');
-    let wallets = await readWallets();
-    
-    // Add configuration
     const config = {
-        checkInterval: 60 * 60, // 1 hour
-        minPointsBeforeClaim: 50, // Min points before claiming
+        checkInterval: 60 * 60,
+        minPointsBeforeClaim: 100,
         maxRetries: 3,
-        healthCheckInterval: 5 * 60, // 5 minutes
+        healthCheckInterval: 5 * 60,
+        setupRetryDelay: 10, // seconds
     };
 
-    if (proxies.length === 0) log.warn("No proxies found in proxy.txt - running without proxies");
+    const proxies = await readFiles('proxy.txt');
+    let wallets = await readWallets();
+
     if (wallets.length === 0) {
-        log.info('No Wallets found, creating new Wallets first "npm run autoref"');
+        log.error('No wallets found. Please run "npm run autoref" first');
         return;
     }
 
-    log.info('Starting run Program with all Wallets:', wallets.length);
+    log.info('Starting program with', wallets.length, 'wallets');
 
-    // Add health check interval
-    setInterval(async () => {
+    // Health check monitoring
+    const healthCheck = setInterval(async () => {
         for (const wallet of wallets) {
-            const socket = new LayerEdge(null, wallet.privateKey);
-            const health = await socket.checkNodeHealth();
-            if (!health) {
-                log.warn(`Node ${wallet.address} appears unhealthy, attempting reconnect...`);
-                await socket.connectNode();
+            try {
+                const socket = new LayerEdge(null, wallet.privateKey);
+                const health = await socket.checkNodeHealth();
+                if (!health) {
+                    log.warn(`Node ${wallet.address} unhealthy - attempting recovery...`);
+                    await socket.setupWallet();
+                }
+            } catch (error) {
+                log.error(`Health check failed for ${wallet.address}:`, error.message);
             }
         }
     }, config.healthCheckInterval * 1000);
 
-    while (true) {
-        for (let i = 0; i < wallets.length; i++) {
-            const wallet = wallets[i];
-            const proxy = proxies[i % proxies.length] || null;
-            const { address, privateKey } = wallet;
+    // Graceful shutdown handler
+    const cleanup = async () => {
+        clearInterval(healthCheck);
+        log.info('Shutting down...');
+        process.exit(0);
+    };
 
-            for (let retry = 0; retry < config.maxRetries; retry++) {
-                try {
-                    const socket = new LayerEdge(proxy, privateKey);
-                    log.info(`Processing Wallet Address: ${address} with proxy:`, proxy);
-                    
-                    // Check points first
-                    const { nodePoints } = await socket.checkNodePoints();
-                    
-                    if (nodePoints >= config.minPointsBeforeClaim) {
-                        log.info(`Sufficient points (${nodePoints}) for claiming...`);
-                        await socket.checkIN();
-                        await socket.stopNode();
-                        await delay(5); // Wait 5 seconds
-                    }
+    process.on('SIGINT', cleanup);
+    process.on('SIGTERM', cleanup);
 
-                    const isRunning = await socket.checkNodeStatus();
-                    if (!isRunning) {
-                        log.info(`Connecting node for Wallet: ${address}`);
-                        await socket.connectNode();
-                    }
+    try {
+        while (true) {
+            for (const wallet of wallets) {
+                const proxy = proxies[Math.floor(Math.random() * proxies.length)] || null;
+                
+                for (let retry = 0; retry < config.maxRetries; retry++) {
+                    try {
+                        const socket = new LayerEdge(proxy, wallet.privateKey);
+                        log.info(`Processing ${wallet.address} with proxy:`, proxy || 'none');
 
-                    break; // Success - exit retry loop
-                    
-                } catch (error) {
-                    log.error(`Error Processing wallet (attempt ${retry + 1}/${config.maxRetries}):`, error.message);
-                    if (retry === config.maxRetries - 1) {
-                        log.error(`Failed all retries for wallet ${address}`);
+                        await socket.setupWallet();
+                        break;
+
+                    } catch (error) {
+                        log.error(`Error processing ${wallet.address} (attempt ${retry + 1}/${config.maxRetries}):`, error.message);
+                        if (retry === config.maxRetries - 1) {
+                            log.error(`Failed all retries for ${wallet.address}`);
+                        }
+                        await delay(config.setupRetryDelay);
                     }
-                    await delay(10); // Wait between retries
                 }
             }
+
+            log.info(`Cycle complete. Waiting ${config.checkInterval/60} minutes...`);
+            await delay(config.checkInterval);
         }
-        
-        log.warn(`All Wallets processed, waiting ${config.checkInterval/60} minutes before next run...`);
-        await delay(config.checkInterval);
+    } catch (error) {
+        log.error('Fatal error:', error);
+        cleanup();
     }
 }
 
-// Add graceful shutdown
-process.on('SIGINT', async () => {
-    log.info('Shutting down gracefully...');
-    // Add cleanup code here if needed
-    process.exit(0);
-});
-
 run().catch(error => {
-    log.error('Fatal error:', error);
+    log.error('Program crashed:', error);
     process.exit(1);
 });
