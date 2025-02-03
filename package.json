@@ -8,7 +8,8 @@
     "start": "node main.js",
     "autoref": "node autoref.js",
     "start:ref": "node mainRef.js",
-    "check": "node utils/check.js"
+    "check": "node utils/check.js",
+    "cli": "node cli.js"
   },
   "author": "@zlkcyber",
   "license": "MIT",
