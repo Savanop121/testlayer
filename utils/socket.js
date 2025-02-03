@@ -21,6 +21,9 @@ class LayerEdgeConnection {
         this.wallet = privateKey
             ? new Wallet(privateKey)
             : Wallet.createRandom();
+
+        this.maxRetries = 5;
+        this.retryDelay = 3000;
     }
 
     getWallet() {
@@ -28,9 +31,16 @@ class LayerEdgeConnection {
     }
 
     async makeRequest(method, url, config = {}, retries = 30) {
+        let lastError = null;
+        
         for (let i = 0; i < retries; i++) {
             try {
-                const headers = { ...this.headers };
+                const headers = { 
+                    ...this.headers,
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                };
+                
                 if (method.toUpperCase() === 'POST') {
                     headers['Content-Type'] = 'application/json';
                 }
@@ -42,8 +52,18 @@ class LayerEdgeConnection {
                     ...this.axiosConfig,
                     ...config,
                 });
+
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
                 return response;
             } catch (error) {
+                lastError = error;
+                
+                if (error?.response?.status === 429) {
+                    await new Promise(resolve => setTimeout(resolve, 10000));
+                    continue;
+                }
+
                 if (error?.response?.status === 404 || error?.status === 404) {
                     log.error(chalk.red(`Layer Edge connection failed wallet not registered yet...`));
                     return 404;
@@ -58,10 +78,11 @@ class LayerEdgeConnection {
                 }
 
                 process.stdout.write(chalk.yellow(`request failed: ${error.message} => Retrying... (${i + 1}/${retries})\r`));
-                await new Promise((resolve) => setTimeout(resolve, 2000));
+                const delay = this.retryDelay * (i + 1);
+                await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
-        return null;
+        throw lastError;
     }
 
     async checkInvite(invite_code) {
@@ -105,29 +126,45 @@ class LayerEdgeConnection {
     }
 
     async connectNode() {
-        const timestamp = Date.now();
-        const message = `Node activation request for ${this.wallet.address} at ${timestamp}`;
-        const sign = await this.wallet.signMessage(message);
+        for (let i = 0; i < this.maxRetries; i++) {
+            try {
+                const timestamp = Date.now();
+                const message = `Node activation request for ${this.wallet.address} at ${timestamp}`;
+                const sign = await this.wallet.signMessage(message);
 
-        const dataSign = {
-            sign: sign,
-            timestamp: timestamp,
-        };
+                const dataSign = {
+                    sign: sign,
+                    timestamp: timestamp,
+                };
 
-        const response = await this.makeRequest(
-            "post",
-            `https://referralapi.layeredge.io/api/light-node/node-action/${this.wallet.address}/start`,
-            { data: dataSign }
-        );
+                const response = await this.makeRequest(
+                    "post",
+                    `https://referralapi.layeredge.io/api/light-node/node-action/${this.wallet.address}/start`,
+                    { data: dataSign }
+                );
 
-        if (response && response.data && response.data.message === "node action executed successfully") {
-            log.info("Connected Node Successfully", response.data);
-            return true;
-        } else {
-            log.info("Failed to connect Node");
-            return false;
+                if (response?.data?.message === "node action executed successfully") {
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                    const isRunning = await this.checkNodeStatus();
+                    
+                    if (isRunning) {
+                        log.info("Node connected and verified running");
+                        return true;
+                    }
+                }
+                
+                log.warn(`Connect attempt ${i + 1} failed, retrying...`);
+                await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+                
+            } catch (error) {
+                log.error(`Connect attempt ${i + 1} failed:`, error.message);
+                if (i === this.maxRetries - 1) throw error;
+                await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+            }
         }
+        return false;
     }
+
     async stopNode() {
         const timestamp = Date.now();
         const message = `Node deactivation request for ${this.wallet.address} at ${timestamp}`;
@@ -216,6 +253,20 @@ class LayerEdgeConnection {
         } else {
             log.error("Failed to check Total Points..");
             return { refCode: null, nodePoints: 0, referralCount: 0 };
+        }
+    }
+
+    async checkNodeHealth() {
+        try {
+            const response = await this.makeRequest(
+                "get", 
+                `https://referralapi.layeredge.io/api/light-node/health/${this.wallet.address}`
+            );
+            
+            return response?.data?.status === "healthy";
+        } catch (error) {
+            log.error("Failed to check node health:", error.message);
+            return false;
         }
     }
 }
