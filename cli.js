@@ -1,175 +1,250 @@
+import axios from 'axios';
+import fs from 'fs';
+import chalk from 'chalk';
 import readline from 'readline';
-import log from './utils/logger.js';
-import banner from './utils/banner.js';
-import { readFiles, delay } from './utils/helper.js';
-import LayerEdge from './utils/socket.js';
-import fs from 'fs/promises';
+import { faker } from '@faker-js/faker';
+import { execSync } from 'child_process';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { HttpProxyAgent } from 'http-proxy-agent';
 
-const WALLETS_PATH = 'wallets.json';
+// Banners
+const ASCII_ART = `
+███████  █████  ██    ██  █████  ███    ██ 
+██      ██   ██ ██    ██ ██   ██ ████   ██ 
+███████ ███████ ██    ██ ███████ ██ ██  ██ 
+     ██ ██   ██  ██  ██  ██   ██ ██  ██ ██ 
+███████ ██   ██   ████   ██   ██ ██   ████
+`;
 
-async function readWallets() {
-    try {
-        await fs.access(WALLETS_PATH);
-        const data = await fs.readFile(WALLETS_PATH, "utf-8");
-        return JSON.parse(data);
-    } catch (err) {
-        if (err.code === 'ENOENT') {
-            log.error("No wallets found in", WALLETS_PATH);
-            return [];
-        }
-        throw err;
-    }
-}
+const BANNER = ASCII_ART;
 
-async function showMenu() {
-    console.log("\n=== LayerEdge CLI Menu ===");
-    console.log("1. Start Node");
-    console.log("2. Stop Node");
-    console.log("3. Check Running Hours");
-    console.log("4. Claim Daily Points");
-    console.log("5. Check Tasks");
-    console.log("6. View Referrals");
-    console.log("7. Exit");
-    console.log("========================\n");
-}
-
-async function calculateRunningHours(socket) {
-    try {
-        const response = await socket.makeRequest(
-            "get",
-            `https://referralapi.layeredge.io/api/light-node/node-status/${socket.wallet.address}`
-        );
-
-        if (response?.data?.data?.startTimestamp) {
-            const startTime = response.data.data.startTimestamp;
-            const currentTime = Math.floor(Date.now() / 1000);
-            const runningSeconds = currentTime - startTime;
-            const runningHours = (runningSeconds / 3600).toFixed(2);
-            return runningHours;
-        }
-        return 0;
-    } catch (error) {
-        log.error("Error calculating running hours:", error.message);
-        return 0;
-    }
-}
-
-async function handleCommand(command, socket) {
-    switch (command) {
-        case "1":
-            log.info("Starting node...");
-            const startResult = await socket.setupWallet();
-            if (startResult) {
-                log.info("Node started successfully!");
-                const hours = await calculateRunningHours(socket);
-                log.info(`Current running time: ${hours} hours`);
-            } else {
-                log.error("Failed to start node");
-            }
-            break;
-
-        case "2":
-            log.info("Stopping node...");
-            const stopResult = await socket.stopNode();
-            if (stopResult) {
-                log.info("Node stopped successfully!");
-            } else {
-                log.error("Failed to stop node");
-            }
-            break;
-
-        case "3":
-            const hours = await calculateRunningHours(socket);
-            log.info(`Total node running time: ${hours} hours`);
-            const { nodePoints } = await socket.checkNodePoints();
-            log.info(`Total accumulated points: ${nodePoints}`);
-            break;
-
-        case "4":
-            log.info("Claiming daily points...");
-            const claimResult = await socket.api.claimDailyPoints();
-            log.info("Claim result:", claimResult);
-            break;
-
-        case "5":
-            log.info("Checking tasks...");
-            const tasks = await socket.api.getTasks();
-            log.info("Available tasks:", tasks);
-            break;
-
-        case "6":
-            const referralInfo = await socket.api.getReferralCode();
-            log.info("Your referral code:", referralInfo);
-            break;
-
-        case "7":
-            log.info("Exiting...");
-            process.exit(0);
-            break;
-
-        default:
-            log.warn("Invalid command");
-    }
-}
-
-async function main() {
-    log.info(banner);
-    await delay(1);
-
-    const wallets = await readWallets();
-    if (wallets.length === 0) {
-        log.error("No wallets found. Please add wallets to wallets.json first");
-        return;
-    }
-
-    const proxies = await readFiles('proxy.txt');
-    let currentWalletIndex = 0;
-
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-
-    log.info(`Loaded ${wallets.length} wallets`);
-    
-    while (true) {
-        const wallet = wallets[currentWalletIndex];
-        const proxy = proxies[currentWalletIndex % proxies.length] || null;
-        
-        log.info(`\nCurrent wallet: ${wallet.address}`);
-        if (proxy) log.info(`Using proxy: ${proxy}`);
-        
-        const socket = new LayerEdge(proxy, wallet.privateKey);
-        
-        await showMenu();
-
-        const command = await new Promise(resolve => {
-            rl.question("Enter command (1-7): ", resolve);
-        });
-
-        await handleCommand(command, socket);
-        
-        if (command === "7") break;
-
-        // Ask if user wants to switch wallet
-        const switchWallet = await new Promise(resolve => {
-            rl.question("\nSwitch to next wallet? (y/n): ", resolve);
-        });
-
-        if (switchWallet.toLowerCase() === 'y') {
-            currentWalletIndex = (currentWalletIndex + 1) % wallets.length;
-        }
-    }
-
-    rl.close();
-}
-
-// Handle errors
-process.on('unhandledRejection', (error) => {
-    log.error('Unhandled promise rejection:', error);
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
 });
 
-main().catch(error => {
-    log.error('Fatal error:', error);
-    process.exit(1);
-}); 
+const apiKeyFilePath = 'apikey.txt';
+const headersFilePath = 'headers.json';
+const proxyIndexFilePath = 'proxy_index.txt';
+const walletFilePath = 'wallet.txt';
+const proxiesFilePath = 'proxy.txt';
+
+const agents = {
+    "deployment_p5J9lz1Zxe7CYEoo0TZpRVay": "Professor"
+};
+
+let rateLimitExceeded = false;
+
+function clearConsole() {
+    execSync(process.platform === 'win32' ? 'cls' : 'clear');
+}
+
+function displayBanner() {
+    clearConsole();
+    console.log(chalk.cyan(BANNER));
+}
+
+// Utility functions
+function loadApiKey() {
+    if (fs.existsSync(apiKeyFilePath)) {
+        return fs.readFileSync(apiKeyFilePath, 'utf-8').trim();
+    }
+    return 'your_groq_apikeys';
+}
+
+function saveApiKey(apiKey) {
+    fs.writeFileSync(apiKeyFilePath, apiKey);
+}
+
+function loadHeaders() {
+    if (fs.existsSync(headersFilePath)) {
+        return JSON.parse(fs.readFileSync(headersFilePath, 'utf-8'));
+    }
+    return {};
+}
+
+function saveHeaders(headers) {
+    fs.writeFileSync(headersFilePath, JSON.stringify(headers, null, 2));
+}
+
+function generateRandomUserAgent() {
+    return faker.internet.userAgent({ deviceCategory: 'desktop' });
+}
+
+function loadProxies() {
+    if (fs.existsSync(proxiesFilePath)) {
+        return fs.readFileSync(proxiesFilePath, 'utf-8').split('\n').filter(Boolean);
+    }
+    return [];
+}
+
+function createProxyAgent(proxy) {
+    const [protocol, host, port] = proxy.split(/:\/\/|:/);
+    switch (protocol) {
+        case 'http':
+            return new HttpProxyAgent(`http://${host}:${port}`);
+        case 'socks4':
+            return new SocksProxyAgent(`socks4://${host}:${port}`);
+        case 'socks5':
+            return new SocksProxyAgent(`socks5://${host}:${port}`);
+        default:
+            throw new Error(`Unsupported proxy protocol: ${protocol}`);
+    }
+}
+
+// Generate a random blockchain-AI question
+async function generateRandomQuestion() {
+    const apiKey = loadApiKey();
+    const themes = [
+        "Decentralized AI Governance",
+        "AI-powered Smart Contracts",
+        "Blockchain-based AI Marketplaces"
+    ];
+    const theme = themes[Math.floor(Math.random() * themes.length)];
+
+    if (rateLimitExceeded) {
+        return `How does ${theme} impact future technologies?`;
+    }
+
+    try {
+        const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+            model: 'llama-3.3-70b-versatile',
+            messages: [{ role: 'user', content: `Generate a short question on '${theme}' in AI & Blockchain context.` }],
+            temperature: 0.9
+        }, {
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        return response.data.choices[0].message.content.trim();
+    } catch (error) {
+        rateLimitExceeded = true;
+        return `What are the challenges in ${theme}?`;
+    }
+}
+
+// Processing wallets with agents
+async function processWallet(wallet, headers, proxies, usedProxies) {
+    console.log(chalk.greenBright(`Processing Wallet: ${wallet}`));
+
+    let proxy = proxies.length > 0 ? proxies[Math.floor(Math.random() * proxies.length)] : null;
+
+    for (const [agentId, agentName] of Object.entries(agents)) {
+        console.log(chalk.yellow(`Using Agent: ${agentName}`));
+
+        for (let i = 0; i < 5; i++) {
+            console.log(chalk.blue(`Iteration ${i + 1}`));
+            const question = await generateRandomQuestion();
+            console.log(chalk.cyan(`Question: ${question}`));
+
+            try {
+                const config = {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...headers,
+                        'User-Agent': generateRandomUserAgent()
+                    }
+                };
+
+                if (proxy) {
+                    config['httpAgent'] = createProxyAgent(proxy);
+                    config['httpsAgent'] = createProxyAgent(proxy);
+                    console.log(chalk.magenta(`Using Proxy: ${proxy}`));
+                }
+
+                const response = await axios.post(`https://${agentId}.stag-vxzy.zettablock.com/main`, { message: question }, config);
+                console.log(chalk.green(`Response: ${response.data.choices[0].message.content}`));
+            } catch (error) {
+                console.error(chalk.red(`Error: ${error.message}`));
+            }
+        }
+    }
+}
+
+// Main function
+async function main() {
+    displayBanner();
+    const wallets = fs.existsSync(walletFilePath) ? fs.readFileSync(walletFilePath, 'utf-8').split('\n').filter(Boolean) : [];
+    const proxies = loadProxies();
+    const headers = loadHeaders();
+
+    for (const wallet of wallets) {
+        if (!headers[wallet]) {
+            headers[wallet] = { 'User-Agent': generateRandomUserAgent() };
+            saveHeaders(headers);
+        }
+
+        await processWallet(wallet, headers, proxies, new Set());
+    }
+}
+
+// Menu functions
+async function showMenu() {
+    displayBanner();
+    console.log(chalk.yellow('\nMenu Options:'));
+    console.log('1. Add Wallet');
+    console.log('2. Set API Key');
+    console.log('3. Reset Wallets');
+    console.log('4. Delete API Key');
+    console.log('5. Start Interaction');
+    console.log('6. Exit');
+}
+
+async function handleMenuChoice() {
+    while (true) {
+        await showMenu();
+        const choice = await new Promise(resolve => rl.question('\nEnter your choice (1-6): ', resolve));
+
+        switch (choice) {
+            case '1':
+                await addWallet();
+                break;
+            case '2':
+                await setApiKey();
+                break;
+            case '3':
+                await resetWallets();
+                break;
+            case '4':
+                await deleteApiKey();
+                break;
+            case '5':
+                await main();
+                break;
+            case '6':
+                rl.close();
+                return;
+            default:
+                console.log(chalk.red('Invalid choice. Press Enter to continue...'));
+                await new Promise(resolve => rl.question('', resolve));
+        }
+    }
+}
+
+async function addWallet() {
+    const wallet = await new Promise(resolve => rl.question('Enter wallet address: ', resolve));
+    fs.appendFileSync(walletFilePath, wallet + '\n');
+    console.log(chalk.green('Wallet added successfully!'));
+}
+
+async function setApiKey() {
+    const apiKey = await new Promise(resolve => rl.question('Enter API Key: ', resolve));
+    saveApiKey(apiKey);
+    console.log(chalk.green('API Key set successfully!'));
+}
+
+async function resetWallets() {
+    fs.writeFileSync(walletFilePath, '');
+    console.log(chalk.green('Wallets reset successfully!'));
+}
+
+async function deleteApiKey() {
+    fs.writeFileSync(apiKeyFilePath, 'your_groq_apikeys');
+    console.log(chalk.green('API Key deleted successfully!'));
+}
+
+// Start the menu
+handleMenuChoice();
